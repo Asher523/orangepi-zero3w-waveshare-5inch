@@ -19,7 +19,7 @@ After the display is plugged in, the DRM connector reports `connected` and a val
 | Item | Value |
 | --- | --- |
 | Board | Orange Pi Zero 3W (Allwinner A733, DTB `sun60i-a733-orangepi-zero3w.dtb`) |
-| OS | Orange Pi Ubuntu 22.04.5 LTS (Jammy), Cinnamon + LightDM |
+| OS | Orange Pi Ubuntu 22.04.5 LTS (Jammy), XFCE + LightDM |
 | Kernel | `5.15.147-sun60iw2` (vendor BSP kernel, uses `sunxi-hdmi` / sunxi-drm) |
 | Display | Waveshare 5inch HDMI LCD Rev 3.1, 800×480, 60.727 Hz, 37.0 MHz pixel clock |
 | Connector | `card0-HDMI-A-1` (mini-HDMI Type-C on the board) |
@@ -256,6 +256,20 @@ The EDID was captured from a laptop that recognises this panel fine:
 ```text
 vendor ADA   800×480 @ 37.000 MHz   htotal 1088 / vtotal 560 ≈ 60.73 Hz
 ```
+
+**`scripts/800x480.edid` is only valid for this exact panel.** A different panel — even another unit of the same model — needs its own dump, otherwise you are feeding the kernel someone else's timing. Dump it on any machine that recognises the panel (a Linux laptop/desktop works):
+
+```bash
+# find the connector that is actually connected
+for c in /sys/class/drm/card*-*; do
+    [ "$(cat $c/status)" = connected ] && echo "$c  $(wc -c < $c/edid) bytes"
+done
+
+# 128 bytes = one EDID block
+sudo cat /sys/class/drm/card0-DP-1/edid > mypanel.bin
+```
+
+On Windows, Monitor Asset Manager or `Get-WmiObject WmiMonitorDescriptorMethods` will do. Replace `scripts/800x480.edid` with your dump and update the `xrandr --newmode` timings in `~/.xsessionrc` to match its DTD.
 
 **Ordering matters**: `force=on` must be written *after* Xorg has already created its screen from the `disconnected` state. Doing it before boot makes Xorg see "connected but zero modes" → `no screens found` → lightdm restart loop (observed NRestarts = 54). Hence `After=lightdm.service` plus a wait for `xfce4-session` inside the script.
 

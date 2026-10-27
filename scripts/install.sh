@@ -31,7 +31,17 @@ install -m 644 -o "$USER_NAME" -g "$USER_NAME" "$HERE/xsessionrc" "$USER_HOME/.x
 
 echo
 echo "已安装。重启后生效。"
-echo
-echo "如果 /boot/orangepiEnv.txt 里还有 extraargs=video=...@60e，请一并删掉："
-echo "  sudo cp /boot/orangepiEnv.txt /boot/orangepiEnv.txt.bak"
-echo "  sudo sed -i '/^extraargs=.*video=/d' /boot/orangepiEnv.txt && sync"
+
+# 上一版（@60e）的残留会让 connector 在开机时就 force=on，
+# 登录前的几十秒仍会 620ms 一次空转，检查一下
+if grep -q '^extraargs=.*video=' /boot/orangepiEnv.txt 2>/dev/null; then
+    echo
+    echo "⚠️  /boot/orangepiEnv.txt 里还留着上一版的强制模式："
+    grep -n '^extraargs=.*video=' /boot/orangepiEnv.txt | sed 's/^/      /'
+    echo "   建议删掉（本方案不需要它）："
+    echo "     sudo cp /boot/orangepiEnv.txt /boot/orangepiEnv.txt.bak"
+    echo "     sudo sed -i '/^extraargs=.*video=/d' /boot/orangepiEnv.txt && sync"
+fi
+
+command -v xrandr >/dev/null 2>&1 ||
+    echo "⚠️  没找到 xrandr，~/.xsessionrc 不会生效：sudo apt install x11-xserver-utils"

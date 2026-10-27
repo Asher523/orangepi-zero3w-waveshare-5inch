@@ -17,14 +17,22 @@
 
 set -e
 
-# 1) 等真正的桌面会话起来（xfce4-session 出现即说明 X 的屏幕已经建好）
+# 1) 等真正的桌面会话起来（任意一种会话管理器出现，即说明 X 的屏幕已经建好）
+session_up() {
+    for s in xfce4-session cinnamon mate-session lxsession \
+             gnome-session-binary plasmashell startplasma-x11; do
+        pgrep -x "$s" >/dev/null 2>&1 && return 0
+    done
+    return 1
+}
+
 n=0
 while [ $n -lt 120 ]; do
-    pgrep -x xfce4-session >/dev/null 2>&1 && break
+    session_up && break
     n=$((n + 1))
     sleep 0.5
 done
-if [ $n -ge 120 ]; then
+if ! session_up; then
     echo "等了 60 秒也没看到桌面会话，放弃" >&2
     exit 0
 fi

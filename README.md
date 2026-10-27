@@ -19,7 +19,7 @@
 | 项目 | 值 |
 | --- | --- |
 | 单板 | Orange Pi Zero 3W（Allwinner A733，DTB `sun60i-a733-orangepi-zero3w.dtb`） |
-| 系统 | Orange Pi 官方 Ubuntu 22.04.5 LTS（Jammy），Cinnamon + LightDM |
+| 系统 | Orange Pi 官方 Ubuntu 22.04.5 LTS（Jammy），XFCE + LightDM |
 | 内核 | `5.15.147-sun60iw2`（厂商 BSP 内核，使用 `sunxi-hdmi` / sunxi-drm） |
 | 屏幕 | Waveshare 5inch HDMI LCD Rev 3.1，800×480，60.727 Hz，像素时钟 37.0 MHz |
 | 连接器 | `card0-HDMI-A-1`（板上为 mini-HDMI Type-C 口） |
@@ -256,6 +256,20 @@ on
 ```text
 厂商 ADA   800×480 @ 37.000 MHz   htotal 1088 / vtotal 560 ≈ 60.73 Hz
 ```
+
+**`scripts/800x480.edid` 只对这块屏有效。** 换一块屏（哪怕是同型号的另一批）务必重新导一份，否则用的是别人屏的时序。在任意一台能正常识别它的机器（笔记本/台式机，Linux 下）导出：
+
+```bash
+# 先确认是哪个连接器
+for c in /sys/class/drm/card*-*; do
+    [ "$(cat $c/status)" = connected ] && echo "$c  $(wc -c < $c/edid) 字节"
+done
+
+# 128 字节 = 一个 EDID block，抄出来
+sudo cat /sys/class/drm/card0-DP-1/edid > mypanel.bin
+```
+
+Windows 下可以用 Monitor Asset Manager，或者 `Get-WmiObject WmiMonitorDescriptorMethods`。拿到 `.bin` 后替换 `scripts/800x480.edid`（或 `install.sh` 里的文件名），并同步改 `~/.xsessionrc` 里 `xrandr --newmode` 的时序参数（从 EDID 的 DTD 换算）。
 
 **顺序是关键**：必须在 Xorg 已经用 `disconnected` 状态把屏幕建好之后，再写 `force=on`。反过来的话，Xorg 看到的是「connected 但零个模式」，直接 `no screens found`，lightdm 无限重启（实测 NRestarts 涨到 54）。所以服务是 `After=lightdm.service`，脚本里还会等 `xfce4-session` 出现才开始写。
 
