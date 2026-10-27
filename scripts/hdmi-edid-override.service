@@ -1,0 +1,15 @@
+[Unit]
+Description=绕过不通的 HDMI DDC/HPD（EDID override + force on）
+Documentation=file:/etc/hdmi-edid/README
+# 必须在 lightdm 之后：先让 Xorg 用 disconnected 状态建好屏幕，
+# 再强制连接。顺序反了会 "no screens found"。
+After=lightdm.service display-manager.service
+Wants=lightdm.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/hdmi-edid-override.sh
+
+[Install]
+WantedBy=multi-user.target

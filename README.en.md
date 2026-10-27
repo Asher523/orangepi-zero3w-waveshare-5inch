@@ -10,6 +10,8 @@ After the display is plugged in, the DRM connector reports `connected` and a val
 
 **Workaround:** force a mode on the connector from the kernel command line — `extraargs=video=HDMI-A-1:800x480@60e` in `/boot/orangepiEnv.txt`, then reboot.
 
+**⚠️ Update (2026-10-27):** the `e` in `@60e` means `DRM_FORCE_ON`. On a panel whose DDC/HPD is dead, every connector probe then burns the full 620 ms I²C timeout and **the whole desktop drops to 3 fps**. If your panel's DDC reads nothing either, skip section 5 and read [section 10](#10-update-2026-10-27-the-hidden-cost-of-60e--the-whole-desktop-drops-to-3-fps), which uses an EDID override plus a delayed `force`.
+
 ---
 
 ## 1. Environment
@@ -186,6 +188,103 @@ zcat /proc/config.gz 2>/dev/null | grep CONFIG_DRM_LOAD_EDID_FIRMWARE
 ## 9. Suggestion for the vendor
 
 The issue can be stated in one sentence: **when the HDMI connector is `connected` with a valid EDID, `sunxi-hdmi` must register the parsed mode(s) on the DRM connector so that `modes` is non-empty and userspace can enable the output.** Right now the driver log confirms successful parsing (`support modes: 1`) while the connector's mode list stays empty, leaving both Xorg and Wayland unable to use the output.
+
+## 10. Update (2026-10-27): the hidden cost of `@60e` — the whole desktop drops to 3 fps
+
+The workaround in section 5 does bring the picture up, but the **entire GUI runs at ~3 fps**: the pointer lags and video is a slideshow. The display, the refresh rate and thermals are all innocent — the `e` flag itself is the problem.
+
+### 10.1 Ruled out first
+
+| Suspect | Measurement | Verdict |
+| --- | --- | --- |
+| Refresh rate | DRM vblank sampled over 10 s = **60.037 Hz**, zero stalled windows | ruled out |
+| Thermal throttling | 8 cores at 100% for 90 s peaked at **71 °C**; cpufreq cooling state stayed at 0 (trip point is 90 °C) | ruled out |
+| Resolution / fill rate | mpv `--vo=null` **307 fps**; `--vo=x11` gives **3.2 fps** at both 800×480 and 160×120 | ruled out — independent of pixel count |
+| Power | Same behaviour with independent and shared screen power | ruled out |
+
+The giveaway: **160×120 is exactly as slow as 800×480**, so the bottleneck is a fixed stall in front of every frame, not the amount being drawn.
+
+### 10.2 Xorg's main thread is stuck in I²C
+
+```bash
+$ sudo cat /proc/$(pgrep -x Xorg)/wchan
+_dw_i2cm_read          # 10/10 samples idle, 10/10 while playing video
+
+$ sudo cat /proc/$(pgrep -x Xorg)/stack
+_dw_i2cm_read
+dw_i2cm_xfer
+sunxi_hdmi_i2cm_xfer
+__i2c_transfer
+drm_do_probe_ddc_edid      ← reading EDID
+drm_do_get_edid
+drm_get_edid
+_sunxi_drv_hdmi_read_edid
+_sunxi_drv_hdmi_hpd_plugin
+_sunxi_drm_hdmi_force
+drm_helper_probe_single_connector_modes
+drm_mode_getconnector       ← from DRM_IOCTL_MODE_GETCONNECTOR
+```
+
+Every time Xorg asks "what's on this connector?", the driver performs a real EDID read over DDC.
+
+### 10.3 Root cause: `e` means `DRM_FORCE_ON`
+
+```bash
+$ sudo cat /sys/kernel/debug/dri/0/HDMI-A-1/force
+on
+```
+
+The `e` in `video=HDMI-A-1:800x480@60e` sets the connector to `DRM_FORCE_ON`. With force active, `drm_helper_probe_single_connector_modes()` invokes the driver's `->force()` callback on every probe. When DDC answers, that is merely slow; when DDC is dead (`i2cget -y 20 0x50 0x00` returns `Read failed`), every read burns the full timeout:
+
+```text
+single forced probe: 620.2 ms   (cached probe right after: 0.0 ms)
+per 10 s: 15 × "detect hpd", 28 × "edid failed", 15 × "force hpd"
+```
+
+15/10 = 1.5 probes per second and 1/0.62 ≈ 1.6 — Xorg is doing nothing else, and every frame waits behind hundreds of milliseconds.
+
+### 10.4 Current approach: EDID override + delayed forcing
+
+If neither DDC nor HPD works, stop asking them:
+
+1. `edid_override` (debugfs) is fed a real EDID, so the kernel never touches DDC
+2. `force=on` supplies the missing HPD state
+3. `~/.xsessionrc` adds the native mode and switches to it
+
+The EDID was captured from a laptop that recognises this panel fine:
+
+```text
+vendor ADA   800×480 @ 37.000 MHz   htotal 1088 / vtotal 560 ≈ 60.73 Hz
+```
+
+**Ordering matters**: `force=on` must be written *after* Xorg has already created its screen from the `disconnected` state. Doing it before boot makes Xorg see "connected but zero modes" → `no screens found` → lightdm restart loop (observed NRestarts = 54). Hence `After=lightdm.service` plus a wait for `xfce4-session` inside the script.
+
+```bash
+sudo ./scripts/install.sh
+```
+
+### 10.5 Result
+
+| | Before | After |
+| --- | --- | --- |
+| Rendering (mpv `--vo=x11`, 800×480) | 3.1 fps | 56–80 fps |
+| `edid failed` per 10 s | 28 | 0 |
+| `force hpd` per 10 s | 15 | 0 |
+| Single forced probe | 620 ms | never triggered |
+
+### 10.6 Rollback
+
+```bash
+sudo systemctl disable --now hdmi-edid-override
+rm ~/.xsessionrc
+sudo reboot
+```
+
+### 10.7 Additional suggestions for the vendor
+
+- The `->force()` path should not read DDC unconditionally; a failed EDID read should be cached and backed off instead of retried for 620 ms on every probe
+- A synchronous I²C transfer inside the `GETCONNECTOR` path blocks userspace's main loop; make it asynchronous or cached
+- `CONFIG_DRM_LOAD_EDID_FIRMWARE` is not enabled — enabling it would at least give users a firmware-EDID fallback (today only debugfs `edid_override` works)
 
 ## References
 

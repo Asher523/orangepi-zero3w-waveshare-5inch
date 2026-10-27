@@ -10,6 +10,8 @@
 
 **绕过**：在内核命令行里强制给这个连接器一个模式——`extraargs=video=HDMI-A-1:800x480@60e`（写在 `/boot/orangepiEnv.txt`），重启后即可出图。
 
+**⚠️ 后续（2026-10-27）**：`@60e` 里的 `e` 是 `DRM_FORCE_ON`，在 DDC/HPD 不通的屏上会让每次探测都卡满 620 ms 的 I²C 超时，**整个桌面掉到 3 fps**。如果你那块屏的 DDC 也读不出来，请直接看 [第 10 节](#10-后续2026-10-27-60e-的代价--整个桌面掉到-3-fps)，用 **EDID override + 延迟 force** 的方案代替第 5 节。
+
 ---
 
 ## 1. 环境
@@ -186,6 +188,103 @@ zcat /proc/config.gz 2>/dev/null | grep CONFIG_DRM_LOAD_EDID_FIRMWARE
 ## 9. 给厂商的建议
 
 问题可以归纳为一句话：**当 HDMI 连接器状态为 `connected` 且 EDID 有效时，`sunxi-hdmi` 必须把解析出的模式注册到 DRM 连接器，使 `modes` 非空、`enabled` 可被用户空间打开。** 目前驱动日志显示解析成功（`support modes: 1`），但连接器模式列表为空，导致 Xorg/Wayland 都无法使用该输出。
+
+## 10. 后续（2026-10-27）：`@60e` 的代价 —— 整个桌面掉到 3 fps
+
+第 5 节的绕过后画面确实出来了，但**整个 GUI 只有 ~3 fps**：鼠标发飘、视频卡成幻灯片。继续查下来，问题不在屏、不在刷新率、不在过热，而是 `e` 这个强制标志本身。
+
+### 10.1 先排除掉的
+
+| 怀疑点 | 实测 | 结论 |
+| --- | --- | --- |
+| 刷新率 | DRM vblank 采样 10 秒 = **60.037 Hz**，0 个停滞窗口 | 排除 |
+| 过热降频 | 8 核满载 90 秒最高 **71 °C**，cpufreq 限频档位始终 0（触发点是 90 °C） | 排除 |
+| 分辨率/填充率 | mpv `--vo=null` **307 fps**；`--vo=x11` 在 800×480 和 160×120 下都是 **3.2 fps** | 排除（与像素数无关） |
+| 供电 | 独立供电与共用供电现象一致 | 排除 |
+
+最说明问题的一行：**160×120 和 800×480 一样慢**。这说明瓶颈是每帧前面一次固定阻塞，而不是画得多。
+
+### 10.2 现场：Xorg 主线程堵在 I²C 里
+
+```bash
+$ sudo cat /proc/$(pgrep -x Xorg)/wchan
+_dw_i2cm_read          # 空闲时 10/10 次采样都在这里；放视频时同样 10/10
+
+$ sudo cat /proc/$(pgrep -x Xorg)/stack
+_dw_i2cm_read
+dw_i2cm_xfer
+sunxi_hdmi_i2cm_xfer
+__i2c_transfer
+drm_do_probe_ddc_edid      ← 在读 EDID
+drm_do_get_edid
+drm_get_edid
+_sunxi_drv_hdmi_read_edid
+_sunxi_drv_hdmi_hpd_plugin
+_sunxi_drm_hdmi_force
+drm_helper_probe_single_connector_modes
+drm_mode_getconnector       ← 来自 DRM_IOCTL_MODE_GETCONNECTOR
+```
+
+也就是说：Xorg 每问一次"显示器什么情况"，驱动都会**真的去 DDC 总线读一遍 EDID**。
+
+### 10.3 根因：`e` 就是 `DRM_FORCE_ON`
+
+```bash
+$ sudo cat /sys/kernel/debug/dri/0/HDMI-A-1/force
+on
+```
+
+`video=HDMI-A-1:800x480@60e` 里的 `e` 把连接器设成了 `DRM_FORCE_ON`。force 一生效，`drm_helper_probe_single_connector_modes()` 每次都会调用驱动的 `->force()` 回调。如果此时 DDC 读得到（本文最初的状态），代价只是慢一点；而一旦 DDC 读不到（`i2cget -y 20 0x50 0x00` 直接 `Read failed`），每次读都要等满超时：
+
+```text
+单次强制探测：620.2 ms   （紧接着读缓存：0.0 ms）
+10 秒内：detect hpd 15 次 / edid failed 28 次 / force hpd 15 次
+```
+
+15 ÷ 10 = 1.5 次/秒，而 1 ÷ 0.62 ≈ 1.6 —— Xorg 是**排满地在做这一件事**，每帧前面都堵着几百毫秒。
+
+### 10.4 现在的做法：EDID override + 延迟强制
+
+既然 DDC 和 HPD 都不可用，就别让内核去问它们：
+
+1. `edid_override`（debugfs）直接塞一份真 EDID，内核不再碰 DDC
+2. `force=on` 补上 HPD
+3. `~/.xsessionrc` 补上原生时序并切换过去
+
+真 EDID 是从一台能正常识别这块屏的笔记本上读出来的：
+
+```text
+厂商 ADA   800×480 @ 37.000 MHz   htotal 1088 / vtotal 560 ≈ 60.73 Hz
+```
+
+**顺序是关键**：必须在 Xorg 已经用 `disconnected` 状态把屏幕建好之后，再写 `force=on`。反过来的话，Xorg 看到的是「connected 但零个模式」，直接 `no screens found`，lightdm 无限重启（实测 NRestarts 涨到 54）。所以服务是 `After=lightdm.service`，脚本里还会等 `xfce4-session` 出现才开始写。
+
+```bash
+sudo ./scripts/install.sh
+```
+
+### 10.5 效果
+
+| 项目 | 修前 | 修后 |
+| --- | --- | --- |
+| 渲染（mpv `--vo=x11`，800×480） | 3.1 fps | 56–80 fps |
+| `edid failed`（10 秒内） | 28 次 | 0 |
+| `force hpd`（10 秒内） | 15 次 | 0 |
+| 单次强制探测 | 620 ms | 不再触发 |
+
+### 10.6 回滚
+
+```bash
+sudo systemctl disable --now hdmi-edid-override
+rm ~/.xsessionrc
+sudo reboot
+```
+
+### 10.7 给厂商的补充建议
+
+- `->force()` 路径下不应无条件读 DDC；EDID 读失败应当缓存失败结果并退避，而不是每次探测都重试 620 ms
+- 同步 I²C 传输放在 `GETCONNECTOR` 的调用路径上，会直接阻塞用户空间的主循环，建议改为异步或带缓存
+- 内核没有启用 `CONFIG_DRM_LOAD_EDID_FIRMWARE`，建议开启，至少让用户能用固件 EDID 兜底（否则只能走 debugfs 的 `edid_override`）
 
 ## 参考
 

@@ -1,0 +1,17 @@
+# 这块屏的 HDMI DDC 不通，内核拿不到 EDID，也就没有模式可用。
+# hdmi-edid-override.service 已经在开机时把 connector 强制成 connected，
+# 这里补上原生时序（来自屏的真实 EDID：800x480 @ 37.000 MHz）。
+# 放后台执行，不拖慢登录；日志在 ~/.hdmi-mode.log。
+(
+    export DISPLAY=:0
+
+    # 等输出变成 connected（service 在会话起来之后才写 force，所以要多等一会儿）
+    for _ in $(seq 1 120); do
+        xrandr --query 2>/dev/null | grep -q '^HDMI-1 connected' && break
+        sleep 0.5
+    done
+
+    xrandr --newmode "800x480_60r" 37.000 800 848 888 1088 480 483 493 560 -HSync -VSync 2>/dev/null
+    xrandr --addmode HDMI-1 800x480_60r 2>/dev/null
+    xrandr --output HDMI-1 --mode 800x480_60r
+) >"$HOME/.hdmi-mode.log" 2>&1 &
