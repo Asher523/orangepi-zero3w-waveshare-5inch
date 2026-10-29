@@ -352,6 +352,18 @@ sudo systemctl reset-failed lightdm && sudo systemctl start lightdm
 
 Note: writing `edid_override` does not refresh the `modes` in sysfs (that is the last probe's cache, and this driver never fills it anyway). Don't judge success by `cat modes` — judge it by whether Xorg starts.
 
+### 10.9 What is verified, and what is not
+
+**Verified** by an actual reboot on 2026-10-29:
+
+- the service ran before lightdm and wrote `edid_override` + `force=on` ahead of X
+- lightdm `NRestarts=0`; output `800x480_60r 60.73*`
+- `edid failed` count in `dmesg`: 0 (no regression to 3 fps)
+
+**Not covered**: on that boot the connector reported `connected` (DDC working). **The case where HPD is fully dead and the connector comes up `disconnected` has not been exercised** — it relies on the same service writing `force=on` before X, which is sound in principle but untested here. This panel's hardware state drifts between the two (10-27 it was `disconnected`, 10-29 it was `connected`), so it cannot be assumed stable.
+
+**A dark screen is not a dead box**: SSH is independent of display, so the three lines in 10.8 recover it without touching the hardware.
+
 ## References
 
 - Kernel `video=` parameter (DRM connector forcing): `Documentation/framebuffer.txt`, `Documentation/gpu/drm-kms.rst`

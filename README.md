@@ -354,6 +354,18 @@ sudo systemctl reset-failed lightdm && sudo systemctl start lightdm
 
 注意：写 `edid_override` 本身不会刷新 sysfs 里的 `modes`（那是上次探测的缓存，而这驱动反正也不会填它）。别拿 `cat modes` 是否为空来判断成功，要看 Xorg 起没起来。
 
+### 10.9 现状：验证过的，和没验证的
+
+**已验证**（2026-10-29 实际重启）：
+
+- 服务早于 lightdm 执行，`edid_override` + `force=on` 在 X 启动前写好
+- lightdm `NRestarts=0`，输出 `800x480_60r 60.73*`
+- `dmesg` 里 `edid failed` 计数为 0（没有退回 3 fps）
+
+**未覆盖**：以上那次开机时连接器报的是 `connected`（DDC 通）。**HPD 完全不通、开机即 `disconnected` 的情况没有真实触发过**——那条路依赖同一个服务在 X 之前写 `force=on`，逻辑上成立，但没被实测。这块屏的硬件状态本来就在两种之间飘（10-27 是 `disconnected`，10-29 是 `connected`），所以不能假设它总是一样。
+
+**真黑屏了也不至于拆机**：SSH 与显示无关，用 10.8 的三行命令即可救回。
+
 ## 参考
 
 - 内核 `video=` 参数（DRM connector forcing）：`Documentation/framebuffer.txt`、`Documentation/gpu/drm-kms.rst`
