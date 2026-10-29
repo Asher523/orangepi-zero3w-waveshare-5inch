@@ -5,6 +5,7 @@
 #
 # 回滚：
 #   sudo systemctl disable --now hdmi-edid-override
+#   sudo rm /etc/X11/xorg.conf.d/20-hdmi-800x480.conf
 #   rm ~/.xsessionrc && sudo reboot
 
 set -e
@@ -19,6 +20,13 @@ mkdir -p /etc/hdmi-edid
 install -m 644 "$HERE/800x480.edid" /etc/hdmi-edid/800x480.bin
 install -m 755 "$HERE/hdmi-edid-override.sh" /usr/local/sbin/hdmi-edid-override.sh
 install -m 644 "$HERE/hdmi-edid-override.service" /etc/systemd/system/hdmi-edid-override.service
+
+# 驱动不给模式，Xorg 必须自己有一条，否则 "Output HDMI-1 enabled but has no modes"
+mkdir -p /etc/X11/xorg.conf.d
+if [ -e /etc/X11/xorg.conf.d/20-hdmi-800x480.conf ]; then
+    cp /etc/X11/xorg.conf.d/20-hdmi-800x480.conf /etc/X11/xorg.conf.d/20-hdmi-800x480.conf.bak
+fi
+install -m 644 "$HERE/20-hdmi-800x480.conf" /etc/X11/xorg.conf.d/20-hdmi-800x480.conf
 
 systemctl daemon-reload
 systemctl enable hdmi-edid-override.service

@@ -1,9 +1,10 @@
 [Unit]
 Description=绕过不通的 HDMI DDC/HPD（EDID override + force on）
 Documentation=file:/etc/hdmi-edid/README
-# 必须在 lightdm 之后：先让 Xorg 用 disconnected 状态建好屏幕，
-# 再强制连接。顺序反了会 "no screens found"。
-After=lightdm.service display-manager.service
+# 必须在 lightdm **之前**完成：Xorg 一启动就要看到 connected 且有模式。
+# 之所以敢提前，是因为 /etc/X11/xorg.conf.d/20-hdmi-800x480.conf 提供了一条
+# Modeline，Xorg 不依赖驱动那张永远为空的模式列表。
+Before=lightdm.service display-manager.service
 Wants=lightdm.service
 
 [Service]

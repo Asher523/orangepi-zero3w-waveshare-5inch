@@ -243,13 +243,15 @@ on
 
 15 ÷ 10 = 1.5 次/秒，而 1 ÷ 0.62 ≈ 1.6 —— Xorg 是**排满地在做这一件事**，每帧前面都堵着几百毫秒。
 
-### 10.4 现在的做法：EDID override + 延迟强制
+### 10.4 现在的做法：EDID override + 强制连接 + Xorg 自带 Modeline
 
-既然 DDC 和 HPD 都不可用，就别让内核去问它们：
+三层各自解决一件事：
 
-1. `edid_override`（debugfs）直接塞一份真 EDID，内核不再碰 DDC
-2. `force=on` 补上 HPD
-3. `~/.xsessionrc` 补上原生时序并切换过去
+1. `edid_override`（debugfs）直接塞一份真 EDID，内核不再碰 DDC —— 解决 620 ms 卡顿
+2. `force=on` 保证 connector 永远是 connected —— 解决 HPD 时有时无
+3. `/etc/X11/xorg.conf.d/20-hdmi-800x480.conf` 里写一条 Modeline —— 解决驱动不给模式
+
+第 3 条是 2026-10-29 补的，见 [10.8](#108-2026-10-29-翻车忘了第-3-条)。
 
 真 EDID 是从一台能正常识别这块屏的笔记本上读出来的：
 
@@ -271,7 +273,7 @@ sudo cat /sys/class/drm/card0-DP-1/edid > mypanel.bin
 
 Windows 下可以用 Monitor Asset Manager，或者 `Get-WmiObject WmiMonitorDescriptorMethods`。拿到 `.bin` 后替换 `scripts/800x480.edid`（或 `install.sh` 里的文件名），并同步改 `~/.xsessionrc` 里 `xrandr --newmode` 的时序参数（从 EDID 的 DTD 换算）。
 
-**顺序是关键**：必须在 Xorg 已经用 `disconnected` 状态把屏幕建好之后，再写 `force=on`。反过来的话，Xorg 看到的是「connected 但零个模式」，直接 `no screens found`，lightdm 无限重启（实测 NRestarts 涨到 54）。所以服务是 `After=lightdm.service`，脚本里还会等 `xfce4-session` 出现才开始写。
+**⚠️ 早期版本里「必须等桌面会话起来再 force」这条规则已经作废**，原因见 10.8。现在服务是 `Before=lightdm.service`，在 X 启动前就把两样都写好。
 
 ```bash
 sudo ./scripts/install.sh
@@ -290,6 +292,7 @@ sudo ./scripts/install.sh
 
 ```bash
 sudo systemctl disable --now hdmi-edid-override
+sudo rm /etc/X11/xorg.conf.d/20-hdmi-800x480.conf
 rm ~/.xsessionrc
 sudo reboot
 ```
@@ -299,6 +302,57 @@ sudo reboot
 - `->force()` 路径下不应无条件读 DDC；EDID 读失败应当缓存失败结果并退避，而不是每次探测都重试 620 ms
 - 同步 I²C 传输放在 `GETCONNECTOR` 的调用路径上，会直接阻塞用户空间的主循环，建议改为异步或带缓存
 - 内核没有启用 `CONFIG_DRM_LOAD_EDID_FIRMWARE`，建议开启，至少让用户能用固件 EDID 兜底（否则只能走 debugfs 的 `edid_override`）
+
+### 10.8 2026-10-29 翻车：漏了"驱动不给模式"这半句
+
+**症状**：开机黑屏。`lightdm` 状态 `failed`、`NRestarts=32`，override 服务日志只有一句：
+
+```text
+等了 60 秒也没看到桌面会话，放弃
+```
+
+**现场**：
+
+```text
+HDMI-A-1: connected          ← DDC 这次是通的
+edid: 128 字节               ← EDID 读得出来
+modes: []                    ← 但驱动依旧不注册（第 5 节的原始 bug）
+Xorg: (EE) Output HDMI-1 enabled but has no modes → no screens found
+```
+
+**死锁**：旧脚本的前提是"Xorg 先起来，再补 EDID/force"。可这次连接器报 `connected`，Xorg 一启动就撞上"连着但零个模式"直接退出 → 没有桌面会话 → 脚本等到超时放弃 → 什么都不写 → 永远黑屏。**整个方案依赖一个环形前提，一旦连接器状态变了就断。**
+
+（10-27 那次为什么能过，当时没留下足够日志，已经说不清了。能确定的是：这不是可靠设计。）
+
+**修法**——把"驱动不给模式"这半句正面解决，而不是绕：
+
+```ini
+# /etc/X11/xorg.conf.d/20-hdmi-800x480.conf
+Section "Monitor"
+    Identifier  "HDMI-1"
+    Option      "Enable" "true"
+    Option      "PreferredMode" "800x480_60r"
+    Modeline    "800x480_60r" 37.000 800 848 888 1088 480 483 493 560 -HSync -VSync
+EndSection
+
+Section "Device"
+    Identifier  "modesetting"
+    Driver      "modesetting"
+EndSection
+```
+
+有了这条 Modeline，Xorg 不再看驱动那张永远为空的模式列表，`force=on` 也就可以放心地**提前**写（服务改成 `Before=lightdm.service`），环形依赖消失。
+
+**不用重启的应急恢复**（黑屏但能 SSH 时）：
+
+```bash
+S=/sys/kernel/debug/dri/0/HDMI-A-1
+sudo sh -c "cat /etc/hdmi-edid/800x480.bin > $S/edid_override; echo on > $S/force"
+sudo systemctl reset-failed lightdm && sudo systemctl start lightdm
+# 只启动一次；起不来就立刻 systemctl stop lightdm，别让它进重启循环
+```
+
+注意：写 `edid_override` 本身不会刷新 sysfs 里的 `modes`（那是上次探测的缓存，而这驱动反正也不会填它）。别拿 `cat modes` 是否为空来判断成功，要看 Xorg 起没起来。
 
 ## 参考
 

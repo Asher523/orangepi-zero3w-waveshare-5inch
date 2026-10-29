@@ -243,13 +243,13 @@ per 10 s: 15 × "detect hpd", 28 × "edid failed", 15 × "force hpd"
 
 15/10 = 1.5 probes per second and 1/0.62 ≈ 1.6 — Xorg is doing nothing else, and every frame waits behind hundreds of milliseconds.
 
-### 10.4 Current approach: EDID override + delayed forcing
+### 10.4 Current approach: three layers, one problem each
 
-If neither DDC nor HPD works, stop asking them:
+1. `edid_override` (debugfs) is fed a real EDID, so the kernel never touches DDC — kills the 620 ms stall
+2. `force=on` keeps the connector `connected` — covers flaky HPD
+3. `/etc/X11/xorg.conf.d/20-hdmi-800x480.conf` carries a Modeline — covers the driver never registering a mode
 
-1. `edid_override` (debugfs) is fed a real EDID, so the kernel never touches DDC
-2. `force=on` supplies the missing HPD state
-3. `~/.xsessionrc` adds the native mode and switches to it
+Layer 3 was added on 2026-10-29; see [10.8](#108-2026-10-29-the-boot-that-came-back-dark).
 
 The EDID was captured from a laptop that recognises this panel fine:
 
@@ -271,7 +271,7 @@ sudo cat /sys/class/drm/card0-DP-1/edid > mypanel.bin
 
 On Windows, Monitor Asset Manager or `Get-WmiObject WmiMonitorDescriptorMethods` will do. Replace `scripts/800x480.edid` with your dump and update the `xrandr --newmode` timings in `~/.xsessionrc` to match its DTD.
 
-**Ordering matters**: `force=on` must be written *after* Xorg has already created its screen from the `disconnected` state. Doing it before boot makes Xorg see "connected but zero modes" → `no screens found` → lightdm restart loop (observed NRestarts = 54). Hence `After=lightdm.service` plus a wait for `xfce4-session` inside the script.
+**⚠️ The older rule "write `force=on` only after the desktop session is up" no longer applies** — see 10.8. The unit is now `Before=lightdm.service` and writes both knobs before X starts.
 
 ```bash
 sudo ./scripts/install.sh
@@ -290,6 +290,7 @@ sudo ./scripts/install.sh
 
 ```bash
 sudo systemctl disable --now hdmi-edid-override
+sudo rm /etc/X11/xorg.conf.d/20-hdmi-800x480.conf
 rm ~/.xsessionrc
 sudo reboot
 ```
@@ -299,6 +300,57 @@ sudo reboot
 - The `->force()` path should not read DDC unconditionally; a failed EDID read should be cached and backed off instead of retried for 620 ms on every probe
 - A synchronous I²C transfer inside the `GETCONNECTOR` path blocks userspace's main loop; make it asynchronous or cached
 - `CONFIG_DRM_LOAD_EDID_FIRMWARE` is not enabled — enabling it would at least give users a firmware-EDID fallback (today only debugfs `edid_override` works)
+
+### 10.8 2026-10-29: the boot that came back dark
+
+**Symptom**: black screen at boot. `lightdm` is `failed` with `NRestarts=32`; the override service logged exactly one line:
+
+```text
+waited 60 seconds, no desktop session, giving up
+```
+
+**What the box actually looked like**:
+
+```text
+HDMI-A-1: connected          ← this time DDC worked
+edid: 128 bytes              ← EDID readable
+modes: []                    ← yet still no mode registered (the section 5 bug)
+Xorg: (EE) Output HDMI-1 enabled but has no modes → no screens found
+```
+
+**Deadlock**: the old script assumed Xorg comes up first, then EDID/force is applied. But with the connector reporting `connected`, Xorg aborts immediately on "connected but zero modes" → no session → the script times out and writes nothing → permanently black. **The design depended on a circular precondition that breaks whenever the connector state changes.**
+
+(Why it survived on 10-27 is no longer recoverable — not enough logs were kept. What is certain is that it was never a sound design.)
+
+**Fix — solve the missing-mode half head-on instead of routing around it**:
+
+```ini
+# /etc/X11/xorg.conf.d/20-hdmi-800x480.conf
+Section "Monitor"
+    Identifier  "HDMI-1"
+    Option      "Enable" "true"
+    Option      "PreferredMode" "800x480_60r"
+    Modeline    "800x480_60r" 37.000 800 848 888 1088 480 483 493 560 -HSync -VSync
+EndSection
+
+Section "Device"
+    Identifier  "modesetting"
+    Driver      "modesetting"
+EndSection
+```
+
+With that Modeline, Xorg no longer consults the driver's permanently empty mode list, so `force=on` can safely be written **before** X starts (`Before=lightdm.service`) and the circular dependency is gone.
+
+**Recovery without rebooting** (screen dark but SSH alive):
+
+```bash
+S=/sys/kernel/debug/dri/0/HDMI-A-1
+sudo sh -c "cat /etc/hdmi-edid/800x480.bin > $S/edid_override; echo on > $S/force"
+sudo systemctl reset-failed lightdm && sudo systemctl start lightdm
+# start it once only; if it does not come up, systemctl stop lightdm before it loops
+```
+
+Note: writing `edid_override` does not refresh the `modes` in sysfs (that is the last probe's cache, and this driver never fills it anyway). Don't judge success by `cat modes` — judge it by whether Xorg starts.
 
 ## References
 
