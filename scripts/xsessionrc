@@ -1,11 +1,12 @@
-# 这块屏的 HDMI DDC 不通，内核拿不到 EDID，也就没有模式可用。
-# hdmi-edid-override.service 已经在开机时把 connector 强制成 connected，
-# 这里补上原生时序（来自屏的真实 EDID：800x480 @ 37.000 MHz）。
+# 这块屏的 HDMI DDC 时好时坏，驱动又不把模式注册到 connector。
+# hdmi-edid-override.service 在开机（X 启动前）就把 EDID override 和 force=on 写好了，
+# /etc/X11/xorg.conf.d/20-hdmi-800x480.conf 提供 Modeline。
+# 这里只做两件收尾：切到原生时序、让屏幕常亮。
 # 放后台执行，不拖慢登录；日志在 ~/.hdmi-mode.log。
 (
     export DISPLAY=:0
 
-    # 等输出变成 connected（service 在会话起来之后才写 force，所以要多等一会儿）
+    # 等输出变成 connected（force 是开机时写的，通常已经就绪）
     for _ in $(seq 1 120); do
         xrandr --query 2>/dev/null | grep -q '^HDMI-1 connected' && break
         sleep 0.5
@@ -14,4 +15,9 @@
     xrandr --newmode "800x480_60r" 37.000 800 848 888 1088 480 483 493 560 -HSync -VSync 2>/dev/null
     xrandr --addmode HDMI-1 800x480_60r 2>/dev/null
     xrandr --output HDMI-1 --mode 800x480_60r
+
+    # 常亮：X 默认 10 分钟 DPMS 待机、15 分钟关屏，这块小屏不该自己黑掉
+    xset s off
+    xset s noblank
+    xset -dpms
 ) >"$HOME/.hdmi-mode.log" 2>&1 &

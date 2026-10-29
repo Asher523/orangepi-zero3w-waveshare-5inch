@@ -364,6 +364,32 @@ Note: writing `edid_override` does not refresh the `modes` in sysfs (that is the
 
 **A dark screen is not a dead box**: SSH is independent of display, so the three lines in 10.8 recover it without touching the hardware.
 
+### 10.10 The other dark screen: DPMS, not HDMI
+
+Later the same day the panel went dark again, and this time everything was healthy over SSH: Xorg up, `xfce4-session` up, `xrandr` reporting `800x480_60r 60.73*`. The giveaway:
+
+```text
+$ DISPLAY=:0 xset -q | grep -A1 -E 'Screen Saver|DPMS'
+  Standby: 600    Suspend: 600    Off: 900
+  Monitor is Off          ← X blanked it itself
+```
+
+X blanks after 10 minutes and turns the output off after 15. On a 5-inch panel used as an always-on desktop that just looks like "it broke again". Recovery:
+
+```bash
+DISPLAY=:0 xset -dpms; DISPLAY=:0 xset dpms force on; DISPLAY=:0 xset -dpms
+# force on re-enables DPMS, so disable it again afterwards
+```
+
+`~/.xsessionrc` now persists `xset s off` / `xset s noblank` / `xset -dpms` at login.
+
+**Telling the two failure modes apart** — this decides whether you touch the HDMI stack at all:
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| SSH works, `xset -q` says `Monitor is Off` | DPMS | the three lines above; leave lightdm alone |
+| `systemctl is-active lightdm` = failed, Xorg log has `no modes` | the HDMI bug from 10.8 | the three lines in 10.8 |
+
 ## References
 
 - Kernel `video=` parameter (DRM connector forcing): `Documentation/framebuffer.txt`, `Documentation/gpu/drm-kms.rst`

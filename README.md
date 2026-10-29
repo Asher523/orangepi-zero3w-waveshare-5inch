@@ -366,6 +366,32 @@ sudo systemctl reset-failed lightdm && sudo systemctl start lightdm
 
 **真黑屏了也不至于拆机**：SSH 与显示无关，用 10.8 的三行命令即可救回。
 
+### 10.10 另一种黑屏：DPMS 把屏幕关了，不是 HDMI 的问题
+
+2026-10-29 当晚又黑了一次，这次 SSH 进去一看全是好的：Xorg 活着、xfce4-session 活着、`xrandr` 报 `800x480_60r 60.73*`。真正的线索是：
+
+```text
+$ DISPLAY=:0 xset -q | grep -A1 -E 'Screen Saver|DPMS'
+  Standby: 600    Suspend: 600    Off: 900
+  Monitor is Off          ← 屏幕被 X 主动关了
+```
+
+X 默认 10 分钟待机、15 分钟关屏。这块 5 寸屏当桌面常显用，黑掉只是觉得"又坏了"。救回来：
+
+```bash
+DISPLAY=:0 xset -dpms; DISPLAY=:0 xset dpms force on; DISPLAY=:0 xset -dpms
+# 注意：force on 之后要先再关一次 DPMS，否则它照样会再次关屏
+```
+
+`~/.xsessionrc` 已把这三行固化（`xset s off` / `xset s noblank` / `xset -dpms`），开机登录即生效。
+
+**区分两种黑屏**——这决定了要不要动 HDMI 那一套：
+
+| 现象 | 病因 | 处理 |
+| --- | --- | --- |
+| SSH 进得去，`xset -q` 说 `Monitor is Off` | DPMS | 上面三行，别碰 lightdm |
+| `systemctl is-active lightdm` = failed，Xorg 日志有 `no modes` | 10.8 的 HDMI 问题 | 10.8 的三行 |
+
 ## 参考
 
 - 内核 `video=` 参数（DRM connector forcing）：`Documentation/framebuffer.txt`、`Documentation/gpu/drm-kms.rst`
